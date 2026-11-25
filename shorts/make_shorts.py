@@ -298,9 +298,53 @@ def patch_embedding_model(model_name: str) -> None:
     te.SentenceTransformer = _PinnedSentenceTransformer
 
 
+def patch_language_whitelist() -> list[str]:
+    """Widen clipsai's hardcoded language whitelist to what whisperx can align.
+
+    clipsai's TranscriberConfigManager.get_valid_languages returns only ten
+    languages and Transcriber.transcribe asserts against it, so passing e.g.
+    'hi' raises TranscriberConfigError even though whisperx ships a Hindi
+    alignment model. The check is skipped entirely when the language is None,
+    so this restriction only ever blocked explicit choices.
+
+    Returns the language codes that are now accepted.
+    """
+    from clipsai.transcribe import transcriber as tr
+
+    supported: set[str] = set()
+    try:
+        from whisperx import alignment as wa
+
+        supported |= set(getattr(wa, "DEFAULT_ALIGN_MODELS_TORCH", {}))
+        supported |= set(getattr(wa, "DEFAULT_ALIGN_MODELS_HF", {}))
+    except Exception:
+        pass  # fall back to clipsai's own list
+
+    cfg = tr.TranscriberConfigManager
+    if getattr(cfg, "_shorts_patched", False):
+        return sorted(cfg(). get_valid_languages())
+
+    original = cfg.get_valid_languages
+
+    def get_valid_languages(self) -> list[str]:
+        return sorted(set(original(self)) | supported)
+
+    cfg.get_valid_languages = get_valid_languages
+    cfg._shorts_patched = True
+    return sorted(set(original(cfg())) | supported)
+
+
 def find_clips(source: Source, args) -> tuple[list[ClipSpec], object]:
     Transcriber, ClipFinder = import_clip_tools()
 
+    if args.language:
+        allowed = patch_language_whitelist()
+        if args.language not in allowed:
+            die(
+                f"whisperx has no alignment model for '{args.language}'.\n"
+                f"Supported: {', '.join(allowed)}\n"
+                "Omit --language to let whisperx auto-detect instead."
+            )
     lang_note = args.language or "auto-detect"
     log(
         f"transcribing with whisper model '{args.whisper_model}' "
