@@ -113,6 +113,7 @@ def download(
     fmt: str,
     cookies_from_browser: str | None,
     js_runtimes: list[str] | None = None,
+    remote_components: list[str] | None = None,
 ) -> Source:
     """Download `url` with yt-dlp and return the resulting file."""
     yt_dlp = import_yt_dlp()
@@ -137,6 +138,10 @@ def download(
         # yt-dlp silently falls back to low-resolution streams. The Python API
         # wants {runtime: {config}}, not the list the command line accepts.
         opts["js_runtimes"] = {name: {} for name in js_runtimes}
+    if remote_components:
+        # Lets yt-dlp fetch its EJS challenge solver at run time. Preferable to
+        # install the yt-dlp-ejs package instead, which needs no network fetch.
+        opts["remote_components"] = list(remote_components)
 
     log(f"downloading {url}")
     try:
@@ -739,6 +744,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="JS runtimes yt-dlp may use, comma separated "
                         "(deno, node, quickjs, bun). YouTube hides its HD formats "
                         "without one. Default: deno")
+    p.add_argument("--remote-components", default=[],
+                   type=lambda v: [x.strip() for x in v.split(",") if x.strip()],
+                   help="let yt-dlp fetch components at run time, e.g. ejs:github. "
+                        "Prefer `pip install yt-dlp-ejs`, which needs no fetch")
     p.add_argument("--hd", action="store_true",
                    help="HD preset: force a 1080p+ source, encode at crf 18 with "
                         "the slow preset, and output 1080x1920. Overrides only the "
@@ -781,7 +790,13 @@ def main(argv: list[str] | None = None) -> int:
         # Only fill in what the user left at its default.
         defaults = {a.dest: a.default for a in parser._actions}
         preset = {
-            "format": "bestvideo*[height>=1080]+bestaudio/best",
+            # Falls back through progressively looser selectors: a strict
+            # 1080p-only selector makes the whole run fail when YouTube hides
+            # its HD formats, which is exactly when you want the warning.
+            "format": (
+                "bestvideo*[height>=1080]+bestaudio/"
+                "bestvideo*+bestaudio/best"
+            ),
             "crf": 18,
             "preset": "slow",
             "scale_height": 1920,
@@ -806,6 +821,7 @@ def main(argv: list[str] | None = None) -> int:
         args.format,
         args.cookies_from_browser,
         args.js_runtimes,
+        args.remote_components,
     )
     src_dims = probe_dimensions(source.path)
     log(f"source resolution: {src_dims[0]}x{src_dims[1]}")
