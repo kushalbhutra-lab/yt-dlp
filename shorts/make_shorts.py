@@ -107,7 +107,13 @@ def import_yt_dlp():
     return yt_dlp
 
 
-def download(url: str, work_dir: Path, fmt: str, cookies_from_browser: str | None) -> Source:
+def download(
+    url: str,
+    work_dir: Path,
+    fmt: str,
+    cookies_from_browser: str | None,
+    js_runtimes: list[str] | None = None,
+) -> Source:
     """Download `url` with yt-dlp and return the resulting file."""
     yt_dlp = import_yt_dlp()
 
@@ -126,6 +132,10 @@ def download(url: str, work_dir: Path, fmt: str, cookies_from_browser: str | Non
     }
     if cookies_from_browser:
         opts["cookiesfrombrowser"] = (cookies_from_browser,)
+    if js_runtimes:
+        # YouTube needs a JS runtime to expose its HD formats; without one
+        # yt-dlp silently falls back to low-resolution streams.
+        opts["js_runtimes"] = list(js_runtimes)
 
     log(f"downloading {url}")
     try:
@@ -723,6 +733,15 @@ def build_parser() -> argparse.ArgumentParser:
                    help="stream-copy instead of re-encoding when not cropping (fast, cuts land on keyframes)")
     p.add_argument("--dry-run", action="store_true",
                    help="download and list clips, write the manifest, render nothing")
+    p.add_argument("--js-runtimes", default=["deno"],
+                   type=lambda v: [x.strip() for x in v.split(",") if x.strip()],
+                   help="JS runtimes yt-dlp may use, comma separated "
+                        "(deno, node, quickjs, bun). YouTube hides its HD formats "
+                        "without one. Default: deno")
+    p.add_argument("--hd", action="store_true",
+                   help="HD preset: force a 1080p+ source, encode at crf 18 with "
+                        "the slow preset, and output 1080x1920. Overrides only the "
+                        "quality options you have not set yourself")
 
     postiz = p.add_argument_group("Postiz publishing")
     postiz.add_argument("--postiz", action="store_true",
@@ -754,13 +773,48 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if args.hd:
+        # Only fill in what the user left at its default.
+        defaults = {a.dest: a.default for a in parser._actions}
+        preset = {
+            "format": "bestvideo*[height>=1080]+bestaudio/best",
+            "crf": 18,
+            "preset": "slow",
+            "scale_height": 1920,
+        }
+        applied = []
+        for key, value in preset.items():
+            if getattr(args, key) == defaults.get(key):
+                setattr(args, key, value)
+                applied.append(key.replace("_", "-"))
+        if not args.center_crop and args.no_reframe:
+            args.center_crop = True
+            applied.append("center-crop")
+        log("HD mode: " + ", ".join(applied))
+
     require_ffmpeg()
 
     out_dir: Path = args.output_dir.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
-    source = download(args.url, out_dir / "source", args.format, args.cookies_from_browser)
+    source = download(
+        args.url,
+        out_dir / "source",
+        args.format,
+        args.cookies_from_browser,
+        args.js_runtimes,
+    )
     src_dims = probe_dimensions(source.path)
+    log(f"source resolution: {src_dims[0]}x{src_dims[1]}")
+    if src_dims[1] < 1080:
+        log(
+            f"  WARNING: source is only {src_dims[1]}p, so clips cannot be HD. "
+            "On YouTube this usually means no JavaScript runtime is installed, "
+            "which hides the HD formats. Install Deno (winget install "
+            "DenoLand.Deno) or pass --js-runtimes node if you have Node."
+        )
 
     clips, _transcription = find_clips(source, args)
     if not clips:
