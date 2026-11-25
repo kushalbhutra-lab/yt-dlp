@@ -198,28 +198,81 @@ class ClipSpec:
         return self.end - self.start
 
 
-def import_clipsai():
+CLIPSAI_INSTALL_HINT = (
+    "clipsai is not installed. Install it with:\n"
+    "    pip install clipsai\n"
+    "    pip install whisperx@git+https://github.com/m-bain/whisperx.git"
+)
+
+
+def _register_surrogate_clipsai() -> None:
+    """Put a stand-in `clipsai` package in sys.modules so its __init__ never runs.
+
+    Importing clipsai.transcribe.transcriber normally executes the parent
+    package's __init__ first, and that __init__ imports the resize code (and so
+    facenet-pytorch). Registering a surrogate parent with the real __path__ lets
+    the submodules import exactly as usual while skipping those re-exports.
+    Safe here because no clipsai module imports from the package root.
+    """
+    import importlib.util
+    import types
+
+    if "clipsai" in sys.modules:
+        return
     try:
-        import clipsai  # noqa: F401
+        spec = importlib.util.find_spec("clipsai")  # does not execute __init__
+    except Exception:
+        return
+    if spec is None or not spec.submodule_search_locations:
+        return  # not installed - let the real import raise a clear error
+
+    surrogate = types.ModuleType("clipsai")
+    surrogate.__path__ = list(spec.submodule_search_locations)
+    surrogate.__spec__ = spec
+    sys.modules["clipsai"] = surrogate
+
+
+def import_clip_tools():
+    """Return (Transcriber, ClipFinder), imported from their own submodules.
+
+    Deliberately NOT `import clipsai`. The package's __init__ eagerly imports
+    the resize code, which needs facenet-pytorch; that is pinned to numpy<2,
+    while whisperx and pyannote.audio need numpy>=2.1. Those cannot coexist, so
+    importing the package wholesale fails on any working install. The transcribe
+    and clip modules have no facenet dependency, so they import cleanly.
+    """
+    _register_surrogate_clipsai()
+    try:
+        from clipsai.transcribe.transcriber import Transcriber
+        from clipsai.clip.clipfinder import ClipFinder
     except ImportError as exc:
-        die(
-            "clipsai is not installed. Install it with:\n"
-            "    pip install clipsai\n"
-            "    pip install whisperx@git+https://github.com/m-bain/whisperx.git\n"
-            f"(underlying import error: {exc})"
-        )
-    return sys.modules["clipsai"]
+        die(f"{CLIPSAI_INSTALL_HINT}\n(underlying import error: {exc})")
+    return Transcriber, ClipFinder
+
+
+def import_resize():
+    """Return (resize_callable, None), or (None, exception) if unavailable.
+
+    Reframing is optional: on a numpy>=2 install facenet-pytorch usually cannot
+    load, and that must not take the rest of the pipeline down with it.
+    """
+    _register_surrogate_clipsai()
+    try:
+        from clipsai.resize.resize import resize
+    except Exception as exc:  # ImportError, or numpy/torch ABI errors
+        return None, exc
+    return resize, None
 
 
 def find_clips(source: Source, args) -> tuple[list[ClipSpec], object]:
-    cai = import_clipsai()
+    Transcriber, ClipFinder = import_clip_tools()
 
     log(f"transcribing with whisper model '{args.whisper_model}' (this is the slow part)")
-    transcriber = cai.Transcriber(model_size=args.whisper_model, device=args.device)
+    transcriber = Transcriber(model_size=args.whisper_model, device=args.device)
     transcription = transcriber.transcribe(audio_file_path=str(source.path))
 
     log("finding clip boundaries")
-    clipfinder = cai.ClipFinder(
+    clipfinder = ClipFinder(
         device=args.device,
         min_clip_duration=args.min_duration,
         max_clip_duration=args.max_duration,
@@ -286,10 +339,21 @@ def compute_reframe(source: Source, args) -> Reframe | None:
         )
         return None
 
-    cai = import_clipsai()
+    resize, resize_error = import_resize()
+    if resize is None:
+        log(
+            "speaker-tracking reframe unavailable: clipsai's resize module could "
+            f"not be loaded ({type(resize_error).__name__}: {resize_error})."
+        )
+        log(
+            "  This is usually facenet-pytorch, which pins numpy<2 while whisperx "
+            "needs numpy>=2.1. Use --center-crop for a static vertical crop."
+        )
+        return None
+
     w, h = args.aspect_ratio
     log(f"running speaker diarization + face detection for a {w}:{h} reframe")
-    crops = cai.resize(
+    crops = resize(
         video_file_path=str(source.path),
         pyannote_auth_token=token,
         aspect_ratio=(w, h),
