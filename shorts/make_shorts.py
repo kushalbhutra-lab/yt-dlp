@@ -134,8 +134,9 @@ def download(
         opts["cookiesfrombrowser"] = (cookies_from_browser,)
     if js_runtimes:
         # YouTube needs a JS runtime to expose its HD formats; without one
-        # yt-dlp silently falls back to low-resolution streams.
-        opts["js_runtimes"] = list(js_runtimes)
+        # yt-dlp silently falls back to low-resolution streams. The Python API
+        # wants {runtime: {config}}, not the list the command line accepts.
+        opts["js_runtimes"] = {name: {} for name in js_runtimes}
 
     log(f"downloading {url}")
     try:
