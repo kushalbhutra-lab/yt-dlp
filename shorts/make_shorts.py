@@ -264,12 +264,51 @@ def import_resize():
     return resize, None
 
 
+def patch_embedding_model(model_name: str) -> None:
+    """Make clipsai's TextEmbedder use `model_name` instead of its hardcoded one.
+
+    clipsai/clip/text_embedder.py does SentenceTransformer("all-roberta-large-v1"),
+    an English-only model. Clip detection works by comparing sentence embeddings,
+    so on non-English audio it compares noise. Swapping the symbol in that
+    module's namespace redirects the construction without touching the package.
+    """
+    from clipsai.clip import text_embedder as te
+    import sentence_transformers
+
+    class _PinnedSentenceTransformer(sentence_transformers.SentenceTransformer):
+        def __init__(self, *args, **kwargs):
+            super().__init__(model_name, **kwargs)
+
+    te.SentenceTransformer = _PinnedSentenceTransformer
+
+
 def find_clips(source: Source, args) -> tuple[list[ClipSpec], object]:
     Transcriber, ClipFinder = import_clip_tools()
 
-    log(f"transcribing with whisper model '{args.whisper_model}' (this is the slow part)")
+    lang_note = args.language or "auto-detect"
+    log(
+        f"transcribing with whisper model '{args.whisper_model}' "
+        f"(language: {lang_note}) - this is the slow part"
+    )
     transcriber = Transcriber(model_size=args.whisper_model, device=args.device)
-    transcription = transcriber.transcribe(audio_file_path=str(source.path))
+    transcription = transcriber.transcribe(
+        audio_file_path=str(source.path),
+        iso6391_lang_code=args.language,
+    )
+
+    detected = getattr(transcription, "language", None)
+    if detected:
+        log(f"language: {detected}")
+    if args.embed_model:
+        log(f"using sentence-embedding model '{args.embed_model}' for clip detection")
+        patch_embedding_model(args.embed_model)
+    elif detected and detected != "en":
+        log(
+            f"note: detected '{detected}' but clip detection uses clipsai's "
+            "English-only embedding model, so boundaries will be rough. "
+            "Pass --embed-model paraphrase-multilingual-mpnet-base-v2 for "
+            "non-English audio."
+        )
 
     log("finding clip boundaries")
     clipfinder = ClipFinder(
@@ -658,6 +697,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="how aggressively clipsai splits topics (default: high)")
     p.add_argument("--max-clips", type=int, default=0,
                    help="render at most N clips (0 = all)")
+    p.add_argument("--language", default=None,
+                   help="ISO 639-1 code to transcribe in, e.g. en or hi "
+                        "(default: auto-detect from the first 30s)")
+    p.add_argument("--embed-model", default=None,
+                   help="sentence-transformers model for clip detection. "
+                        "clipsai defaults to the English-only all-roberta-large-v1; "
+                        "for Hindi or mixed audio use "
+                        "paraphrase-multilingual-mpnet-base-v2")
 
     p.add_argument("--aspect-ratio", type=parse_ratio, default=(9, 16),
                    help="target aspect ratio (default: 9:16)")
