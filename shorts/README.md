@@ -137,6 +137,34 @@ transcript text for that range — handy for captions or titles. After a
 `--postiz` run it also carries a `postiz` block with the media id, post ids,
 target channels and scheduled time for every clip.
 
+## Windows notes
+
+Two things bite on Windows, and the setup script handles both:
+
+- **libmagic.** `clipsai` depends on `python-magic`, which ships no DLL on
+  Windows. Install `python-magic-bin==0.4.14` *after* clipsai, or clipsai's own
+  dependency resolution overwrites it and you get
+  `ImportError: failed to find libmagic`.
+- **nltk data.** `clipsai` calls `nltk.download("punkt")` at import time, but
+  nltk >= 3.8.2 needs `punkt_tab` for `sent_tokenize`. Fetch both.
+
+## Why reframing may be unavailable
+
+`clipsai/__init__.py` imports the resize code, which imports `facenet-pytorch`.
+That package's newest release (2.6.0) pins `numpy<2`, while `whisperx` needs
+`numpy>=2.1` and `pyannote.audio` needs `numpy>=2.0`. Those cannot coexist, so
+`import clipsai` fails on any install where transcription works.
+
+`make_shorts.py` therefore imports `clipsai.transcribe.transcriber` and
+`clipsai.clip.clipfinder` directly, registering a surrogate parent package so
+the broken `__init__` never runs. Transcription, clip detection, cutting and
+Postiz publishing all work. Speaker-tracking reframing does not, and the script
+says so and continues. Use `--center-crop` for vertical output.
+
+To get reframing back you need a separate environment pinned to
+`torch==2.2.2 torchaudio==2.2.2 torchvision==0.17.2` and `numpy<2`, running the
+resize step on its own.
+
 ## Notes and limits
 
 - Clips AI is built for speech-driven video (podcasts, interviews, talks). On
