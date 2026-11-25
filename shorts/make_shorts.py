@@ -737,8 +737,11 @@ def build_parser() -> argparse.ArgumentParser:
         description="Download a video with yt-dlp and cut it into shorts with Clips AI.",
     )
     p.add_argument("url", help="video URL to pass to yt-dlp")
-    p.add_argument("-o", "--output-dir", type=Path, default=Path("shorts_out"),
-                   help="where clips and the manifest are written (default: shorts_out)")
+    default_out = os.environ.get("SHORTS_OUTPUT_DIR") or "shorts_out"
+    p.add_argument("-o", "--output-dir", type=Path, default=Path(default_out),
+                   help="where clips and the manifest are written. Defaults to the "
+                        "SHORTS_OUTPUT_DIR environment variable if set, otherwise "
+                        f"shorts_out (currently: {default_out})")
     p.add_argument("--format", default="bestvideo*+bestaudio/best",
                    help="yt-dlp format selector")
     p.add_argument("--cookies-from-browser", default=None,
@@ -857,8 +860,15 @@ def main(argv: list[str] | None = None) -> int:
 
     require_ffmpeg()
 
-    out_dir: Path = args.output_dir.resolve()
+    out_dir: Path = args.output_dir.expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
+    source_note = (
+        " (from SHORTS_OUTPUT_DIR)"
+        if os.environ.get("SHORTS_OUTPUT_DIR") and "--output-dir" not in (argv or sys.argv)
+        and "-o" not in (argv or sys.argv)
+        else ""
+    )
+    log(f"output folder: {out_dir}{source_note}")
     source = download(
         args.url,
         out_dir / "source",
