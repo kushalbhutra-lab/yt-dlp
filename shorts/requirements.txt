@@ -1,0 +1,7 @@
+# Shorts pipeline dependencies.
+# WhisperX is NOT here on purpose: it installs from git and pip cannot resolve
+# it from a plain requirements line reliably. Install it separately:
+#   pip install whisperx@git+https://github.com/m-bain/whisperx.git
+
+clipsai==0.2.1
+yt-dlp
